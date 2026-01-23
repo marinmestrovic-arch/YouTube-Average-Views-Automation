@@ -97,7 +97,7 @@ def is_stale_or_missing(iso_value: Optional[str]) -> bool:
 # HubSpot API calls
 # ---------------------------
 
-def search_contacts_needing_update(limit: int = 1000) -> List[Dict[str, Any]]:
+def search_contacts_needing_update(limit: int = 200) -> List[Dict[str, Any]]:
     """Fetch contacts with channel identifier and filter stale/missing dates in-code."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=STALE_DAYS)
     contacts: Dict[str, Dict[str, Any]] = {}
@@ -207,7 +207,7 @@ def process_contact(contact: Dict[str, Any], yt_client: YouTubeClient) -> None:
 def main() -> None:
     yt_client = YouTubeClient()  # uses YT_API_KEY env var internally
 
-    contacts = search_contacts_needing_update(limit=1000)
+    contacts = search_contacts_needing_update(limit=200)
     print(f"Found {len(contacts)} contact(s) needing update")
 
     for c in contacts:

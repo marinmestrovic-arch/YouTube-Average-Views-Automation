@@ -8,7 +8,11 @@ Usage:
 
 import sys
 import json
+import warnings
 from pathlib import Path
+
+# Suppress urllib3 OpenSSL warning
+warnings.filterwarnings("ignore", category=Warning, module="urllib3")
 
 # Add src directory to path so we can import youtube_api
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))

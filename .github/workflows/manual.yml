@@ -1,0 +1,27 @@
+name: HubSpot YouTube Sync
+
+on:
+  schedule:
+    # Runs every 5 minutes for testing
+    - cron: '*/5 * * * *'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run HubSpot sync
+        run: python hubspot/hubspot_avg_views_last_30d.py
+        env:
+          HUBSPOT_PRIVATE_APP_TOKEN: ${{ secrets.HUBSPOT_PRIVATE_APP_TOKEN }}
+          YT_API_KEY: ${{ secrets.YT_API_KEY }}

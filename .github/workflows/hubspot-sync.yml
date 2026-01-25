@@ -3,7 +3,7 @@ name: HubSpot YouTube Sync
 on:
   schedule:
     # Runs every 5 minutes for testing
-    - cron: '*/5 * * * *'
+    - cron: '5 * * * *'
 
 jobs:
   sync:

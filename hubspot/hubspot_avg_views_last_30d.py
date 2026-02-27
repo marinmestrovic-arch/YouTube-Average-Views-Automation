@@ -174,6 +174,11 @@ def process_contact(contact: Dict[str, Any], yt_client: YouTubeClient) -> None:
     if not channel_identifier:
         print(f"[skip] contact {cid}: no {PROP_CHANNEL_IDENTIFIER}")
         return
+    print(
+        f"[debug] contact {cid} email={props.get('email')} "
+        f"{PROP_CHANNEL_IDENTIFIER}='{channel_identifier}' "
+        f"last_updated='{props.get(PROP_LAST_UPDATED)}'"
+    )
 
     # Compute new average using your existing helper
     try:
@@ -184,7 +189,16 @@ def process_contact(contact: Dict[str, Any], yt_client: YouTubeClient) -> None:
             fetch_count=FETCH_COUNT,
         )
     except Exception as e:
-        print(f"[error] contact {cid}: failed to compute avg for '{channel_identifier}': {e}")
+        extra = ""
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            try:
+                extra = f" | youtube_error={resp.json()}"
+            except Exception:
+                extra = f" | youtube_error_text={resp.text}"
+        print(
+            f"[error] contact {cid}: failed to compute avg for '{channel_identifier}': {e}{extra}"
+        )
         return
 
     # Prepare update

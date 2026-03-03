@@ -41,12 +41,14 @@ def iso8601_duration_to_minutes(dur: str) -> float:
     return hours * 60 + minutes + seconds / 60.0
 
 
-def avg_views_last_30d(client: YouTubeClient, channel_identifier: str, min_minutes: int = 3, fetch_count: int = 50) -> float:
+def avg_views_last_30d(client: YouTubeClient, channel_identifier: str, min_minutes: int = 3, fetch_count: int = 25) -> float:
     """Return average view count for videos published in last 30 days and longer than min_minutes.
 
     - `fetch_count` controls how many recent videos to fetch from the uploads playlist.
+    - `fetch_count` is capped at 25 to control YouTube API quota usage.
     """
-    videos = client.fetch_videos(channel_identifier, max_results=fetch_count)
+    fetch_limit = max(1, min(fetch_count, 25))
+    videos = client.fetch_videos(channel_identifier, max_results=fetch_limit)
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     matching_views: List[int] = []
     for v in videos:

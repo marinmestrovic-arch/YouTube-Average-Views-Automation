@@ -43,15 +43,26 @@ class YouTubeClient:
 
     def resolve_channel_id(self, identifier: str) -> str:
         """Resolve a handle, URL, or channel ID to the canonical channel ID."""
+        identifier = identifier.strip()
         if identifier.startswith("UC") and len(identifier) > 20:
             return identifier
-        identifier = identifier.strip()
         if identifier.startswith("http"):
             parts = identifier.rstrip("/").split("/")
             possible = parts[-1]
             if possible.startswith("UC"):
                 return possible
             identifier = possible
+        if identifier.startswith("@"):
+            handle = identifier[1:]
+            data = self._get("channels", {"part": "id", "forHandle": handle})
+            items = data.get("items", [])
+            if not items:
+                raise ValueError(f"Channel not found for handle: {identifier}")
+            return items[0]["id"]
+        data = self._get("channels", {"part": "id", "forUsername": identifier})
+        items = data.get("items", [])
+        if items:
+            return items[0]["id"]
         data = self._get("search", {"part": "snippet", "q": identifier, "type": "channel", "maxResults": 1})
         items = data.get("items", [])
         if not items:
@@ -79,8 +90,22 @@ class YouTubeClient:
 
     def fetch_videos(self, channel_id: str, max_results: int = 10) -> List[Dict]:
         """Return recent videos from the channel uploads playlist with basic details."""
-        channel_id = self.resolve_channel_id(channel_id)
-        ch = self._get("channels", {"part": "contentDetails", "id": channel_id})
+        identifier = channel_id.strip()
+        if identifier.startswith("http"):
+            parts = identifier.rstrip("/").split("/")
+            possible = parts[-1]
+            if possible:
+                identifier = possible
+
+        if identifier.startswith("UC") and len(identifier) > 20:
+            ch = self._get("channels", {"part": "contentDetails", "id": identifier})
+        elif identifier.startswith("@"):
+            ch = self._get("channels", {"part": "contentDetails", "forHandle": identifier[1:]})
+            if not ch.get("items", []):
+                raise ValueError(f"Channel not found for handle: {identifier}")
+        else:
+            resolved_channel_id = self.resolve_channel_id(identifier)
+            ch = self._get("channels", {"part": "contentDetails", "id": resolved_channel_id})
         items = ch.get("items", [])
         if not items:
             return []

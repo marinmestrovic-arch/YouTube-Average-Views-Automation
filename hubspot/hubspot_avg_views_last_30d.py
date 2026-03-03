@@ -51,6 +51,7 @@ if not HUBSPOT_TOKEN:
     raise RuntimeError("HUBSPOT_PRIVATE_APP_TOKEN env var is required")
 
 BASE_URL = "https://api.hubapi.com"
+HUBSPOT_SEARCH_MAX_PAGE_SIZE = 200
 
 HEADERS = {
     "Authorization": f"Bearer {HUBSPOT_TOKEN}",
@@ -62,7 +63,18 @@ STALE_DAYS = int(os.environ.get("YOUTUBE_AVG_STALE_DAYS", "30"))
 
 # Optional tuning
 MIN_DURATION_MINUTES = int(os.environ.get("YOUTUBE_MIN_DURATION_MINUTES", "3"))
-FETCH_COUNT = int(os.environ.get("YOUTUBE_FETCH_COUNT", "50"))
+FETCH_COUNT = int(os.environ.get("YOUTUBE_FETCH_COUNT", "25"))
+
+# Quota-aware cap for how many creators to process per run.
+# Assumes optimized @handle flow: channels(forHandle) + playlistItems + videos ~= 3 units/creator.
+YOUTUBE_DAILY_QUOTA_UNITS = int(os.environ.get("YOUTUBE_DAILY_QUOTA_UNITS", "10000"))
+YOUTUBE_UNITS_PER_CREATOR = int(os.environ.get("YOUTUBE_UNITS_PER_CREATOR", "3"))
+YOUTUBE_QUOTA_BUFFER = float(os.environ.get("YOUTUBE_QUOTA_BUFFER", "0.85"))
+AUTO_CREATOR_CAP = max(
+    1,
+    int((YOUTUBE_DAILY_QUOTA_UNITS * YOUTUBE_QUOTA_BUFFER) // max(1, YOUTUBE_UNITS_PER_CREATOR)),
+)
+CREATOR_DAILY_CAP = int(os.environ.get("YOUTUBE_CREATOR_DAILY_CAP", str(AUTO_CREATOR_CAP)))
 
 # HubSpot property internal names
 PROP_AVG_VIEWS = "youtube_video_average_views"
@@ -124,7 +136,8 @@ def search_contacts_needing_update(limit: int = 200) -> List[Dict[str, Any]]:
                 "lastname",
                 "email",
             ],
-            "limit": min(1000, limit - len(contacts)),
+            # HubSpot CRM search endpoint supports max 200 records per request.
+            "limit": min(HUBSPOT_SEARCH_MAX_PAGE_SIZE, limit - len(contacts)),
         }
         if after:
             payload["after"] = after
@@ -221,8 +234,12 @@ def process_contact(contact: Dict[str, Any], yt_client: YouTubeClient) -> None:
 def main() -> None:
     yt_client = YouTubeClient()  # uses YT_API_KEY env var internally
 
-    contacts = search_contacts_needing_update(limit=200)
-    print(f"Found {len(contacts)} contact(s) needing update")
+    contacts = search_contacts_needing_update(limit=CREATOR_DAILY_CAP)
+    print(
+        f"Found {len(contacts)} contact(s) needing update "
+        f"(daily cap={CREATOR_DAILY_CAP}, quota={YOUTUBE_DAILY_QUOTA_UNITS}, "
+        f"units/creator={YOUTUBE_UNITS_PER_CREATOR}, buffer={YOUTUBE_QUOTA_BUFFER})"
+    )
 
     for c in contacts:
         last_updated = (c.get("properties") or {}).get(PROP_LAST_UPDATED)

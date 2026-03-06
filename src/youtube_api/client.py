@@ -2,12 +2,16 @@ import os
 import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 from dateutil import parser as date_parser
 
 
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
+CHANNEL_ID_RE = re.compile(r"^UC[\w-]{22}$")
+VIDEO_ID_RE = re.compile(r"^[\w-]{11}$")
+URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 
 def _iso8601_duration_to_minutes(dur: str) -> float:
@@ -41,33 +45,165 @@ class YouTubeClient:
         resp.raise_for_status()
         return resp.json()
 
-    def resolve_channel_id(self, identifier: str) -> str:
-        """Resolve a handle, URL, or channel ID to the canonical channel ID."""
-        identifier = identifier.strip()
-        if identifier.startswith("UC") and len(identifier) > 20:
-            return identifier
-        if identifier.startswith("http"):
-            parts = identifier.rstrip("/").split("/")
-            possible = parts[-1]
-            if possible.startswith("UC"):
-                return possible
-            identifier = possible
-        if identifier.startswith("@"):
-            handle = identifier[1:]
-            data = self._get("channels", {"part": "id", "forHandle": handle})
-            items = data.get("items", [])
-            if not items:
-                raise ValueError(f"Channel not found for handle: {identifier}")
-            return items[0]["id"]
-        data = self._get("channels", {"part": "id", "forUsername": identifier})
-        items = data.get("items", [])
-        if items:
-            return items[0]["id"]
-        data = self._get("search", {"part": "snippet", "q": identifier, "type": "channel", "maxResults": 1})
+    def _resolve_channel_id_by_handle(self, handle: str) -> Optional[str]:
+        data = self._get("channels", {"part": "id", "forHandle": handle})
         items = data.get("items", [])
         if not items:
+            return None
+        return items[0].get("id")
+
+    def _resolve_channel_id_by_username(self, username: str) -> Optional[str]:
+        data = self._get("channels", {"part": "id", "forUsername": username})
+        items = data.get("items", [])
+        if not items:
+            return None
+        return items[0].get("id")
+
+    def _resolve_channel_id_by_search(self, query: str) -> Optional[str]:
+        data = self._get("search", {"part": "snippet", "q": query, "type": "channel", "maxResults": 1})
+        items = data.get("items", [])
+        if not items:
+            return None
+        return items[0].get("snippet", {}).get("channelId")
+
+    def _resolve_channel_id_from_video(self, video_id: str) -> Optional[str]:
+        data = self._get("videos", {"part": "snippet", "id": video_id})
+        items = data.get("items", [])
+        if not items:
+            return None
+        return items[0].get("snippet", {}).get("channelId")
+
+    def _parse_youtube_identifier(self, identifier: str) -> Dict[str, Optional[str]]:
+        value = (identifier or "").strip()
+        if not value:
+            return {"kind": "empty", "value": None}
+
+        if CHANNEL_ID_RE.fullmatch(value):
+            return {"kind": "channel_id", "value": value}
+
+        if value.startswith("@") and len(value) > 1:
+            return {"kind": "handle", "value": value[1:].strip()}
+
+        # HubSpot may store bare domain strings without a scheme.
+        possible_url = value
+        if possible_url.startswith("//"):
+            possible_url = f"https:{possible_url}"
+        elif not URL_SCHEME_RE.match(possible_url):
+            lowered = possible_url.lower()
+            if lowered.startswith(("youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be")):
+                possible_url = f"https://{possible_url}"
+
+        if URL_SCHEME_RE.match(possible_url):
+            parsed = urlparse(possible_url)
+            host = (parsed.netloc or "").lower()
+            if host.startswith("www."):
+                host = host[4:]
+            if host.startswith("m."):
+                host = host[2:]
+
+            path_parts = [unquote(p) for p in (parsed.path or "").split("/") if p]
+            query = parse_qs(parsed.query or "")
+
+            if host in {"youtu.be"}:
+                if path_parts and VIDEO_ID_RE.fullmatch(path_parts[0]):
+                    return {"kind": "video_id", "value": path_parts[0]}
+                return {"kind": "unknown", "value": value}
+
+            if host in {"youtube.com", "music.youtube.com", "youtube-nocookie.com"}:
+                if path_parts and path_parts[0].startswith("@") and len(path_parts[0]) > 1:
+                    return {"kind": "handle", "value": path_parts[0][1:]}
+
+                if len(path_parts) >= 2 and path_parts[0] == "channel":
+                    channel_id = path_parts[1]
+                    if CHANNEL_ID_RE.fullmatch(channel_id):
+                        return {"kind": "channel_id", "value": channel_id}
+                    return {"kind": "unknown", "value": value}
+
+                if len(path_parts) >= 2 and path_parts[0] == "user":
+                    return {"kind": "username", "value": path_parts[1]}
+
+                if len(path_parts) >= 2 and path_parts[0] == "c":
+                    return {"kind": "custom", "value": path_parts[1]}
+
+                if path_parts and path_parts[0] == "watch":
+                    video_id = query.get("v", [None])[0]
+                    if video_id and VIDEO_ID_RE.fullmatch(video_id):
+                        return {"kind": "video_id", "value": video_id}
+
+                if len(path_parts) >= 2 and path_parts[0] in {"shorts", "live", "embed", "v"}:
+                    video_id = path_parts[1]
+                    if VIDEO_ID_RE.fullmatch(video_id):
+                        return {"kind": "video_id", "value": video_id}
+
+                if path_parts:
+                    first = path_parts[0]
+                    if first not in {
+                        "feed",
+                        "playlist",
+                        "results",
+                        "watch",
+                        "shorts",
+                        "live",
+                        "embed",
+                        "v",
+                        "channel",
+                        "user",
+                        "c",
+                    }:
+                        return {"kind": "custom", "value": first}
+
+                return {"kind": "unknown", "value": value}
+
+            return {"kind": "unknown_url", "value": value}
+
+        return {"kind": "plain", "value": value}
+
+    def resolve_channel_id(self, identifier: str) -> str:
+        """Resolve a handle, URL, or channel ID to the canonical channel ID."""
+        parsed = self._parse_youtube_identifier(identifier)
+        kind = parsed["kind"]
+        value = (parsed["value"] or "").strip()
+
+        if kind == "empty":
+            raise ValueError("Channel identifier is empty")
+        if kind == "channel_id":
+            return value
+        if kind == "handle":
+            channel_id = self._resolve_channel_id_by_handle(value)
+            if channel_id:
+                return channel_id
+            raise ValueError(f"Channel not found for handle: @{value}")
+        if kind == "video_id":
+            channel_id = self._resolve_channel_id_from_video(value)
+            if channel_id:
+                return channel_id
+            raise ValueError(f"Could not resolve channel from video id: {value}")
+        if kind == "unknown_url":
+            raise ValueError(f"URL is not a supported YouTube channel/video URL: {identifier}")
+        if kind == "username":
+            channel_id = self._resolve_channel_id_by_username(value)
+            if channel_id:
+                return channel_id
+            channel_id = self._resolve_channel_id_by_handle(value)
+            if channel_id:
+                return channel_id
+            channel_id = self._resolve_channel_id_by_search(value)
+            if channel_id:
+                return channel_id
+            raise ValueError(f"Channel not found for username: {value}")
+        if kind in {"custom", "plain", "unknown"}:
+            channel_id = self._resolve_channel_id_by_handle(value)
+            if channel_id:
+                return channel_id
+            channel_id = self._resolve_channel_id_by_username(value)
+            if channel_id:
+                return channel_id
+            channel_id = self._resolve_channel_id_by_search(value)
+            if channel_id:
+                return channel_id
             raise ValueError(f"Channel not found for identifier: {identifier}")
-        return items[0]["snippet"]["channelId"]
+
+        raise ValueError(f"Unsupported channel identifier: {identifier}")
 
     def fetch_channel_info(self, channel_id: str) -> Dict:
         """Fetch channel snippet, statistics, and content details."""
@@ -90,21 +226,16 @@ class YouTubeClient:
 
     def fetch_videos(self, channel_id: str, max_results: int = 10) -> List[Dict]:
         """Return recent videos from the channel uploads playlist with basic details."""
-        identifier = channel_id.strip()
-        if identifier.startswith("http"):
-            parts = identifier.rstrip("/").split("/")
-            possible = parts[-1]
-            if possible:
-                identifier = possible
-
-        if identifier.startswith("UC") and len(identifier) > 20:
-            ch = self._get("channels", {"part": "contentDetails", "id": identifier})
-        elif identifier.startswith("@"):
-            ch = self._get("channels", {"part": "contentDetails", "forHandle": identifier[1:]})
+        parsed = self._parse_youtube_identifier(channel_id)
+        if parsed["kind"] == "channel_id":
+            ch = self._get("channels", {"part": "contentDetails", "id": parsed["value"]})
+        elif parsed["kind"] == "handle":
+            handle = parsed["value"]
+            ch = self._get("channels", {"part": "contentDetails", "forHandle": handle})
             if not ch.get("items", []):
-                raise ValueError(f"Channel not found for handle: {identifier}")
+                raise ValueError(f"Channel not found for handle: @{handle}")
         else:
-            resolved_channel_id = self.resolve_channel_id(identifier)
+            resolved_channel_id = self.resolve_channel_id(channel_id)
             ch = self._get("channels", {"part": "contentDetails", "id": resolved_channel_id})
         items = ch.get("items", [])
         if not items:

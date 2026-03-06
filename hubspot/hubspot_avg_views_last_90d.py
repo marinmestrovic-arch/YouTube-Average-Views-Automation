@@ -5,7 +5,7 @@ Update HubSpot contact properties:
 - last_updated_youtube_video_average_views
 
 For contacts whose (last_updated_youtube_video_average_views) is > 30 days ago
-(or missing), compute the current 30-day average views for videos longer than
+(or missing), compute the current 90-day average views for videos longer than
 X minutes on their YouTube channel.
 
 Requirements:
@@ -13,8 +13,8 @@ Requirements:
     - env YT_API_KEY (or pass into YouTubeClient some other way)
 
 Assumptions:
-    - Contact has a text property: youtube_channel_identifier
-      which can be a handle (@...), channel URL, or channel ID.
+    - Contact has a text property with channel URL (default internal name:
+      `youtube_url`). Optional fallback to handle property is supported.
 
 Properties (internal names):
     - youtube_video_average_views (number)
@@ -39,7 +39,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from src.youtube_api.client import YouTubeClient
-from scripts.avg_views_last_30d import avg_views_last_30d  # reuse your function
+from scripts.avg_views_last_90d import avg_views_last_90d
 
 
 # ---------------------------
@@ -64,6 +64,7 @@ STALE_DAYS = int(os.environ.get("YOUTUBE_AVG_STALE_DAYS", "30"))
 # Optional tuning
 MIN_DURATION_MINUTES = int(os.environ.get("YOUTUBE_MIN_DURATION_MINUTES", "3"))
 FETCH_COUNT = int(os.environ.get("YOUTUBE_FETCH_COUNT", "25"))
+AVG_WINDOW_DAYS = int(os.environ.get("YOUTUBE_AVG_WINDOW_DAYS", "90"))
 
 # Quota-aware cap for how many creators to process per run.
 # Assumes optimized @handle flow: channels(forHandle) + playlistItems + videos ~= 3 units/creator.
@@ -79,7 +80,13 @@ CREATOR_DAILY_CAP = int(os.environ.get("YOUTUBE_CREATOR_DAILY_CAP", str(AUTO_CRE
 # HubSpot property internal names
 PROP_AVG_VIEWS = "youtube_video_average_views"
 PROP_LAST_UPDATED = "last_updated_youtube_video_average_views"
-PROP_CHANNEL_IDENTIFIER = "youtube_handle"
+PROP_YOUTUBE_URL = os.environ.get("HUBSPOT_PROP_YOUTUBE_URL", "youtube_url")
+PROP_YOUTUBE_HANDLE = os.environ.get("HUBSPOT_PROP_YOUTUBE_HANDLE", "youtube_handle")
+USE_HANDLE_FALLBACK = os.environ.get("YOUTUBE_USE_HANDLE_FALLBACK", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 
 # ---------------------------
@@ -105,37 +112,46 @@ def is_stale_or_missing(iso_value: Optional[str]) -> bool:
     return dt < cutoff
 
 
+def select_channel_identifier(properties: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """Return best channel identifier and originating HubSpot property."""
+    channel_url = (properties.get(PROP_YOUTUBE_URL) or "").strip()
+    if channel_url:
+        return channel_url, PROP_YOUTUBE_URL
+
+    if USE_HANDLE_FALLBACK:
+        channel_handle = (properties.get(PROP_YOUTUBE_HANDLE) or "").strip()
+        if channel_handle:
+            return channel_handle, PROP_YOUTUBE_HANDLE
+
+    return None, None
+
+
 # ---------------------------
 # HubSpot API calls
 # ---------------------------
 
 def search_contacts_needing_update(limit: int = 200) -> List[Dict[str, Any]]:
     """Fetch contacts with channel identifier and filter stale/missing dates in-code."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=STALE_DAYS)
     contacts: Dict[str, Dict[str, Any]] = {}
+    filter_groups = [{"filters": [{"propertyName": PROP_YOUTUBE_URL, "operator": "HAS_PROPERTY"}]}]
+    requested_props = [
+        PROP_AVG_VIEWS,
+        PROP_LAST_UPDATED,
+        PROP_YOUTUBE_URL,
+        "firstname",
+        "lastname",
+        "email",
+    ]
+    if USE_HANDLE_FALLBACK and PROP_YOUTUBE_HANDLE != PROP_YOUTUBE_URL:
+        filter_groups.append({"filters": [{"propertyName": PROP_YOUTUBE_HANDLE, "operator": "HAS_PROPERTY"}]})
+        requested_props.append(PROP_YOUTUBE_HANDLE)
 
     url = f"{BASE_URL}/crm/v3/objects/contacts/search"
     after = None
     while len(contacts) < limit:
         payload: Dict[str, Any] = {
-            "filterGroups": [
-                {
-                    "filters": [
-                        {
-                            "propertyName": PROP_CHANNEL_IDENTIFIER,
-                            "operator": "HAS_PROPERTY",
-                        }
-                    ]
-                }
-            ],
-            "properties": [
-                PROP_AVG_VIEWS,
-                PROP_LAST_UPDATED,
-                PROP_CHANNEL_IDENTIFIER,
-                "firstname",
-                "lastname",
-                "email",
-            ],
+            "filterGroups": filter_groups,
+            "properties": requested_props,
             # HubSpot CRM search endpoint supports max 200 records per request.
             "limit": min(HUBSPOT_SEARCH_MAX_PAGE_SIZE, limit - len(contacts)),
         }
@@ -182,24 +198,28 @@ def process_contact(contact: Dict[str, Any], yt_client: YouTubeClient) -> None:
     cid = contact["id"]
     props = contact.get("properties", {}) or {}
 
-    # Get channel identifier from contact
-    channel_identifier = props.get(PROP_CHANNEL_IDENTIFIER)
+    # Prefer YouTube URL, optionally fallback to handle.
+    channel_identifier, source_property = select_channel_identifier(props)
     if not channel_identifier:
-        print(f"[skip] contact {cid}: no {PROP_CHANNEL_IDENTIFIER}")
+        print(
+            f"[skip] contact {cid}: missing '{PROP_YOUTUBE_URL}'"
+            + (f" and '{PROP_YOUTUBE_HANDLE}'" if USE_HANDLE_FALLBACK else "")
+        )
         return
     print(
         f"[debug] contact {cid} email={props.get('email')} "
-        f"{PROP_CHANNEL_IDENTIFIER}='{channel_identifier}' "
+        f"source_property='{source_property}' identifier='{channel_identifier}' "
         f"last_updated='{props.get(PROP_LAST_UPDATED)}'"
     )
 
-    # Compute new average using your existing helper
+    # Compute new average for the configured window (default: 90 days)
     try:
-        avg = avg_views_last_30d(
+        avg = avg_views_last_90d(
             yt_client,
             channel_identifier=channel_identifier,
             min_minutes=MIN_DURATION_MINUTES,
             fetch_count=FETCH_COUNT,
+            window_days=AVG_WINDOW_DAYS,
         )
     except Exception as e:
         extra = ""
@@ -238,7 +258,8 @@ def main() -> None:
     print(
         f"Found {len(contacts)} contact(s) needing update "
         f"(daily cap={CREATOR_DAILY_CAP}, quota={YOUTUBE_DAILY_QUOTA_UNITS}, "
-        f"units/creator={YOUTUBE_UNITS_PER_CREATOR}, buffer={YOUTUBE_QUOTA_BUFFER})"
+        f"units/creator={YOUTUBE_UNITS_PER_CREATOR}, buffer={YOUTUBE_QUOTA_BUFFER}, "
+        f"avg_window_days={AVG_WINDOW_DAYS})"
     )
 
     for c in contacts:

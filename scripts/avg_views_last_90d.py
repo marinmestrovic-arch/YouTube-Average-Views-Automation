@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Compute average views in the last 30 days for videos longer than X minutes.
+"""Compute average views in the last 90 days for videos longer than X minutes.
 
 Usage:
-    python scripts/avg_views_last_30d.py <channel_identifier> [API_KEY]
+    python scripts/avg_views_last_90d.py <channel_identifier> [API_KEY]
 
 Examples:
-    python scripts/avg_views_last_30d.py "@veritasium"
-    python scripts/avg_views_last_30d.py UC_xxx YOUR_API_KEY
+    python scripts/avg_views_last_90d.py "@veritasium"
+    python scripts/avg_views_last_90d.py UC_xxx YOUR_API_KEY
 """
 import os
 import re
@@ -25,6 +25,8 @@ if project_root not in sys.path:
 
 from src.youtube_api.client import YouTubeClient
 
+DEFAULT_WINDOW_DAYS = 90
+
 
 def iso8601_duration_to_minutes(dur: str) -> float:
     hours = minutes = seconds = 0
@@ -41,15 +43,21 @@ def iso8601_duration_to_minutes(dur: str) -> float:
     return hours * 60 + minutes + seconds / 60.0
 
 
-def avg_views_last_30d(client: YouTubeClient, channel_identifier: str, min_minutes: int = 3, fetch_count: int = 25) -> float:
-    """Return average view count for videos published in last 30 days and longer than min_minutes.
+def avg_views_last_90d(
+    client: YouTubeClient,
+    channel_identifier: str,
+    min_minutes: int = 3,
+    fetch_count: int = 25,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+) -> float:
+    """Return average views for videos in the most recent `window_days` and longer than `min_minutes`.
 
     - `fetch_count` controls how many recent videos to fetch from the uploads playlist.
     - `fetch_count` is capped at 25 to control YouTube API quota usage.
     """
     fetch_limit = max(1, min(fetch_count, 25))
     videos = client.fetch_videos(channel_identifier, max_results=fetch_limit)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     matching_views: List[int] = []
     for v in videos:
         pub = v.get("publishedAt")
@@ -81,13 +89,13 @@ def avg_views_last_30d(client: YouTubeClient, channel_identifier: str, min_minut
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: avg_views_last_30d.py <channel_identifier> [API_KEY]")
+        print("Usage: avg_views_last_90d.py <channel_identifier> [API_KEY]")
         sys.exit(1)
     identifier = sys.argv[1]
     api_key = sys.argv[2] if len(sys.argv) > 2 else None
     client = YouTubeClient(api_key) if api_key else YouTubeClient()
-    avg = avg_views_last_30d(client, identifier)
-    print(f"Average views (last 30 days, >3min): {avg:.2f}")
+    avg = avg_views_last_90d(client, identifier)
+    print(f"Average views (last {DEFAULT_WINDOW_DAYS} days, >3min): {avg:.2f}")
 
 
 if __name__ == "__main__":
